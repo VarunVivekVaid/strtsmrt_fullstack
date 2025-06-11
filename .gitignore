@@ -34,3 +34,35 @@ dist-ssr
 .temp
 build
 coverage
+
+# Reference files and test data
+references/
+
+# Temporary files and directories
+temp/
+tmp/
+*.tmp
+*.temp
+
+# Large media files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.wmv
+*.flv
+*.m4v
+*.mpeg
+*.mpg
+*.3gp
+
+# Database files
+*.sqlite
+*.sqlite3
+*.db
+
+# Backup files
+*.bak
+*.backup
+*~
