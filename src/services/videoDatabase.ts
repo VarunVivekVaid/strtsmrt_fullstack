@@ -23,6 +23,8 @@ export class VideoDatabase {
         duration DECIMAL(10, 2),
         file_size BIGINT NOT NULL,
         raw_metadata JSONB,
+        processing_status TEXT DEFAULT 'unprocessed' CHECK (processing_status IN ('unprocessed', 'processing', 'completed', 'failed')),
+        processing_error TEXT,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
@@ -31,6 +33,7 @@ export class VideoDatabase {
       CREATE INDEX IF NOT EXISTS idx_video_metadata_user_id ON video_metadata(upload_user_id);
       CREATE INDEX IF NOT EXISTS idx_video_metadata_camera_id ON video_metadata(camera_id);
       CREATE INDEX IF NOT EXISTS idx_video_metadata_recorded_at ON video_metadata(recorded_at);
+      CREATE INDEX IF NOT EXISTS idx_video_metadata_status ON video_metadata(processing_status);
       
       -- Enable RLS
       ALTER TABLE video_metadata ENABLE ROW LEVEL SECURITY;
@@ -77,7 +80,9 @@ export class VideoDatabase {
           upload_user_id: metadata.upload_user_id,
           duration: metadata.duration,
           file_size: metadata.file_size,
-          raw_metadata: metadata.raw_metadata
+          raw_metadata: metadata.raw_metadata,
+          processing_status: metadata.processing_status || 'unprocessed',
+          processing_error: metadata.processing_error
         }])
         .select()
         .single()
@@ -191,6 +196,31 @@ export class VideoDatabase {
     } catch (error) {
       console.error('Error fetching video metadata by path:', error)
       throw new Error(`Failed to fetch video metadata: ${error}`)
+    }
+  }
+
+  /**
+   * Updates the processing status of a video
+   */
+  static async updateProcessingStatus(id: string, status: 'unprocessed' | 'processing' | 'completed' | 'failed', error?: string): Promise<VideoMetadata> {
+    try {
+      const { data, error: updateError } = await supabase
+        .from('video_metadata')
+        .update({
+          processing_status: status,
+          processing_error: error,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', id)
+        .select()
+        .single()
+      
+      if (updateError) throw updateError
+      
+      return data as VideoMetadata
+    } catch (error) {
+      console.error('Error updating processing status:', error)
+      throw new Error(`Failed to update processing status: ${error}`)
     }
   }
 } 

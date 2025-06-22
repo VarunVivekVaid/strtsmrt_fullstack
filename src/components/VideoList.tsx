@@ -23,32 +23,68 @@ import {
   Tr,
   Th,
   Td,
-  TableContainer
+  TableContainer,
+  Progress,
+  Accordion,
+  AccordionItem,
+  AccordionButton,
+  AccordionPanel,
+  AccordionIcon
 } from '@chakra-ui/react'
 import { VideoDatabase } from '../services/videoDatabase'
 import type { VideoMetadata } from '../types/video'
 import { SUPPORTED_CAMERAS } from '../types/video'
 
-interface StorageVideo {
-  name: string
-  created_at: string
+interface VideoClip {
   id: string
-  metadata: {
-    size: number
-    mimetype: string
-  }
+  clip_file_path: string
+  clip_index: number
+  duration: number
+  pothole_detected: boolean
+  gps_records: any[]
+  ml_analysis_status: string
+}
+
+interface EnhancedVideoMetadata extends VideoMetadata {
+  clips_count?: number
+  pothole_clips_count?: number
+  clips?: VideoClip[]
+}
+
+interface UserStats {
+  total_videos: number
+  total_clips: number
+  total_potholes: number
+  processing_videos: number
+  failed_videos: number
 }
 
 export default function VideoList() {
-  const [videos, setVideos] = useState<StorageVideo[]>([])
-  const [videoMetadata, setVideoMetadata] = useState<VideoMetadata[]>([])
+  const [videoMetadata, setVideoMetadata] = useState<EnhancedVideoMetadata[]>([])
+  const [userStats, setUserStats] = useState<UserStats | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>('')
+  const [expandedVideo, setExpandedVideo] = useState<string | null>(null)
 
   useEffect(() => {
     checkAdminStatus()
     fetchData()
+    
+    // Set up real-time updates for processing status
+    const subscription = supabase
+      .channel('video_updates')
+      .on('postgres_changes', 
+        { event: '*', schema: 'public', table: 'video_metadata' }, 
+        () => fetchData()
+      )
+      .on('postgres_changes', 
+        { event: '*', schema: 'public', table: 'video_clips' }, 
+        () => fetchData()
+      )
+      .subscribe()
+    
+    return () => subscription.unsubscribe()
   }, [])
 
   const checkAdminStatus = async () => {
@@ -69,32 +105,72 @@ export default function VideoList() {
       setLoading(true)
       setError('')
       
-      // Fetch storage videos
-      const { data: storageData, error: storageError } = await supabase
-        .storage
-        .from('videos')
-        .list()
-
-      if (storageError) {
-        throw storageError
-      }
-
-      setVideos(storageData || [])
-
-      // Fetch video metadata from database
       const { data: { user } } = await supabase.auth.getUser()
-      if (user) {
-        const metadata = isAdmin 
-          ? await VideoDatabase.getAllVideoMetadata()
-          : await VideoDatabase.getUserVideoMetadata(user.id)
-        
-        setVideoMetadata(metadata)
+      if (!user) return
+
+      // Fetch video metadata with clips count
+      const videosQuery = supabase
+        .from('video_metadata_with_user')
+        .select('*')
+        .order('created_at', { ascending: false })
+
+      const { data: videos, error: videosError } = isAdmin 
+        ? await videosQuery
+        : await videosQuery.eq('upload_user_id', user.id)
+      
+      if (videosError) throw videosError
+
+      setVideoMetadata(videos || [])
+
+      // Fetch user statistics
+      const { data: stats, error: statsError } = await supabase
+        .rpc('get_user_video_stats', { p_user_id: user.id })
+        .single()
+      
+      if (statsError) {
+        console.warn('Failed to fetch stats:', statsError)
+      } else {
+        setUserStats(stats)
       }
+
     } catch (err) {
       console.error('Error fetching data:', err)
       setError('Failed to load video data')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const fetchVideoClips = async (videoId: string) => {
+    try {
+      const { data: clips, error } = await supabase
+        .from('video_clips')
+        .select('*')
+        .eq('video_id', videoId)
+        .order('clip_index')
+      
+      if (error) throw error
+
+      // Update the video in the state with clips data
+      setVideoMetadata(prev => prev.map(video => 
+        video.id === videoId 
+          ? { ...video, clips: clips || [] }
+          : video
+      ))
+    } catch (error) {
+      console.error('Error fetching clips:', error)
+    }
+  }
+
+  const handleToggleVideoDetails = (videoId: string) => {
+    if (expandedVideo === videoId) {
+      setExpandedVideo(null)
+    } else {
+      setExpandedVideo(videoId)
+      const video = videoMetadata.find(v => v.id === videoId)
+      if (video && !video.clips) {
+        fetchVideoClips(videoId)
+      }
     }
   }
 
@@ -118,6 +194,26 @@ export default function VideoList() {
     return coord ? coord.toFixed(6) : 'N/A'
   }
 
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'completed': return 'green'
+      case 'processing': return 'yellow' 
+      case 'failed': return 'red'
+      case 'unprocessed': return 'gray'
+      default: return 'gray'
+    }
+  }
+
+  const getStatusDisplay = (status: string) => {
+    switch (status) {
+      case 'completed': return 'Completed'
+      case 'processing': return 'Processing...'
+      case 'failed': return 'Failed'
+      case 'unprocessed': return 'Unprocessed'
+      default: return status
+    }
+  }
+
   const handleViewVideo = (videoPath: string) => {
     const { data } = supabase.storage
       .from('videos')
@@ -125,15 +221,11 @@ export default function VideoList() {
     window.open(data.publicUrl, '_blank')
   }
 
-  if (!isAdmin) {
-    return (
-      <Box p={4}>
-        <Alert status="warning">
-          <AlertIcon />
-          You don't have permission to view this page.
-        </Alert>
-      </Box>
-    )
+  const handleViewClip = (clipPath: string) => {
+    const { data } = supabase.storage
+      .from('videos')
+      .getPublicUrl(clipPath)
+    window.open(data.publicUrl, '_blank')
   }
 
   if (loading) {
@@ -148,7 +240,9 @@ export default function VideoList() {
   return (
     <Box p={6} maxW="1200px" mx="auto">
       <VStack spacing={6} align="stretch">
-        <Heading size="lg">Video Management (Admin View)</Heading>
+        <Heading size="lg">
+          {isAdmin ? 'Video Management (Admin View)' : 'My Videos'}
+        </Heading>
         
         {error && (
           <Alert status="error">
@@ -158,156 +252,203 @@ export default function VideoList() {
         )}
 
         {/* Summary Stats */}
-        <HStack spacing={6} justify="center">
-          <Stat>
-            <StatLabel>Total Videos</StatLabel>
-            <StatNumber>{videoMetadata.length}</StatNumber>
-            <StatHelpText>In database</StatHelpText>
-          </Stat>
-          <Stat>
-            <StatLabel>Storage Files</StatLabel>
-            <StatNumber>{videos.length}</StatNumber>
-            <StatHelpText>In storage bucket</StatHelpText>
-          </Stat>
-          <Stat>
-            <StatLabel>With GPS Data</StatLabel>
-            <StatNumber>
-              {videoMetadata.filter(v => v.start_latitude && v.start_longitude).length}
-            </StatNumber>
-            <StatHelpText>Have coordinates</StatHelpText>
-          </Stat>
-        </HStack>
+        {userStats && (
+          <SimpleGrid columns={[2, 3, 5]} spacing={4}>
+            <Stat>
+              <StatLabel>Total Videos</StatLabel>
+              <StatNumber>{userStats.total_videos}</StatNumber>
+              <StatHelpText>Uploaded</StatHelpText>
+            </Stat>
+            <Stat>
+              <StatLabel>Video Clips</StatLabel>
+              <StatNumber>{userStats.total_clips}</StatNumber>
+              <StatHelpText>Generated</StatHelpText>
+            </Stat>
+            <Stat>
+              <StatLabel>Potholes</StatLabel>
+              <StatNumber>{userStats.total_potholes}</StatNumber>
+              <StatHelpText>Detected</StatHelpText>
+            </Stat>
+            <Stat>
+              <StatLabel>Processing</StatLabel>
+              <StatNumber>{userStats.processing_videos}</StatNumber>
+              <StatHelpText>In progress</StatHelpText>
+            </Stat>
+            <Stat>
+              <StatLabel>Failed</StatLabel>
+              <StatNumber>{userStats.failed_videos}</StatNumber>
+              <StatHelpText>Need retry</StatHelpText>
+            </Stat>
+          </SimpleGrid>
+        )}
 
         <Divider />
 
-        {/* Video Metadata Table */}
+        {/* Video List */}
         <Box>
-          <Heading size="md" mb={4}>Video Metadata</Heading>
+          <Heading size="md" mb={4}>Videos</Heading>
           {videoMetadata.length === 0 ? (
             <Text color="gray.500" textAlign="center" py={8}>
-              No video metadata found in database
+              No videos found. Upload your first video to get started!
             </Text>
           ) : (
-            <TableContainer>
-              <Table size="sm" variant="striped">
-                <Thead>
-                  <Tr>
-                    <Th>File Name</Th>
-                    <Th>Camera</Th>
-                    <Th>Duration</Th>
-                    <Th>Size</Th>
-                    <Th>GPS Start</Th>
-                    <Th>GPS End</Th>
-                    <Th>Recorded</Th>
-                    <Th>Actions</Th>
-                  </Tr>
-                </Thead>
-                <Tbody>
-                  {videoMetadata.map((video) => (
-                    <Tr key={video.id}>
-                      <Td>
-                        <Text fontSize="sm" fontWeight="medium">
-                          {video.file_name}
-                        </Text>
-                      </Td>
-                      <Td>
-                        <Badge colorScheme="blue" size="sm">
-                          {getCameraName(video.camera_id)}
-                        </Badge>
-                      </Td>
-                      <Td>{formatDuration(video.duration)}</Td>
-                      <Td>{formatFileSize(video.file_size)}</Td>
-                      <Td>
-                        {video.start_latitude && video.start_longitude ? (
-                          <VStack spacing={0} align="start">
-                            <Text fontSize="xs">{formatCoordinate(video.start_latitude)}</Text>
-                            <Text fontSize="xs">{formatCoordinate(video.start_longitude)}</Text>
-                          </VStack>
-                        ) : (
-                          <Text fontSize="xs" color="gray.400">No GPS</Text>
-                        )}
-                      </Td>
-                      <Td>
-                        {video.end_latitude && video.end_longitude ? (
-                          <VStack spacing={0} align="start">
-                            <Text fontSize="xs">{formatCoordinate(video.end_latitude)}</Text>
-                            <Text fontSize="xs">{formatCoordinate(video.end_longitude)}</Text>
-                          </VStack>
-                        ) : (
-                          <Text fontSize="xs" color="gray.400">No GPS</Text>
-                        )}
-                      </Td>
-                      <Td>
-                        <Text fontSize="xs">
-                          {video.recorded_at 
-                            ? new Date(video.recorded_at).toLocaleString()
-                            : 'Unknown'
-                          }
-                        </Text>
-                      </Td>
-                      <Td>
-                        <Button
-                          size="xs"
-                          colorScheme="blue"
-                          onClick={() => handleViewVideo(video.file_path)}
-                        >
-                          View
-                        </Button>
-                      </Td>
-                    </Tr>
-                  ))}
-                </Tbody>
-              </Table>
-            </TableContainer>
-          )}
-        </Box>
+            <Accordion allowToggle index={expandedVideo ? videoMetadata.findIndex(v => v.id === expandedVideo) : -1}>
+              {videoMetadata.map((video) => (
+                <AccordionItem key={video.id}>
+                  <AccordionButton onClick={() => handleToggleVideoDetails(video.id || '')}>
+                    <Box flex="1" textAlign="left">
+                      <HStack spacing={4} justify="space-between" w="100%">
+                        <VStack align="start" spacing={1}>
+                          <Text fontWeight="bold" fontSize="md">
+                            {video.file_name}
+                          </Text>
+                          <HStack spacing={2}>
+                            <Badge colorScheme="blue" size="sm">
+                              {getCameraName(video.camera_id)}
+                            </Badge>
+                            <Badge colorScheme={getStatusColor(video.processing_status || 'unknown')} size="sm">
+                              {getStatusDisplay(video.processing_status || 'unknown')}
+                            </Badge>
+                            {video.clips_count && (
+                              <Badge colorScheme="green" size="sm">
+                                {video.clips_count} clips
+                              </Badge>
+                            )}
+                            {video.pothole_clips_count && video.pothole_clips_count > 0 && (
+                              <Badge colorScheme="orange" size="sm">
+                                {video.pothole_clips_count} potholes
+                              </Badge>
+                            )}
+                          </HStack>
+                        </VStack>
+                        <VStack align="end" spacing={1}>
+                          <Text fontSize="sm">
+                            {formatDuration(video.duration)} • {formatFileSize(video.file_size)}
+                          </Text>
+                          <Text fontSize="xs" color="gray.500">
+                            {video.recorded_at ? new Date(video.recorded_at).toLocaleDateString() : 'Unknown date'}
+                          </Text>
+                        </VStack>
+                      </HStack>
+                    </Box>
+                    <AccordionIcon />
+                  </AccordionButton>
+                  <AccordionPanel>
+                    <VStack spacing={4} align="stretch">
+                      {/* Processing Status */}
+                      {video.processing_status === 'processing' && (
+                        <Box>
+                          <Text fontSize="sm" mb={2}>Processing video...</Text>
+                          <Progress size="sm" isIndeterminate colorScheme="blue" />
+                        </Box>
+                      )}
+                      
+                      {video.processing_status === 'unprocessed' && (
+                        <Alert status="info" size="sm">
+                          <AlertIcon />
+                          <Text fontSize="sm">Video uploaded successfully. Ready for processing.</Text>
+                        </Alert>
+                      )}
+                      
+                      {video.processing_status === 'failed' && video.processing_error && (
+                        <Alert status="error" size="sm">
+                          <AlertIcon />
+                          <Text fontSize="sm">Processing failed: {video.processing_error}</Text>
+                        </Alert>
+                      )}
 
-        <Divider />
+                      {/* Video Details */}
+                      <SimpleGrid columns={[1, 2]} spacing={4}>
+                        <Box>
+                          <Text fontSize="sm" fontWeight="semibold">GPS Coordinates</Text>
+                          {video.start_latitude && video.start_longitude ? (
+                            <VStack align="start" spacing={1}>
+                              <Text fontSize="xs">
+                                Start: {formatCoordinate(video.start_latitude)}, {formatCoordinate(video.start_longitude)}
+                              </Text>
+                              {video.end_latitude && video.end_longitude && (
+                                <Text fontSize="xs">
+                                  End: {formatCoordinate(video.end_latitude)}, {formatCoordinate(video.end_longitude)}
+                                </Text>
+                              )}
+                            </VStack>
+                          ) : (
+                            <Text fontSize="xs" color="gray.400">No GPS data available</Text>
+                          )}
+                        </Box>
+                        <Box>
+                          <Button
+                            size="sm"
+                            colorScheme="blue"
+                            onClick={() => handleViewVideo(video.file_path)}
+                          >
+                            View Original Video
+                          </Button>
+                        </Box>
+                      </SimpleGrid>
 
-        {/* Storage Files (Legacy View) */}
-        <Box>
-          <Heading size="md" mb={4}>Storage Files (Raw)</Heading>
-          {videos.length === 0 ? (
-            <Text color="gray.500" textAlign="center" py={8}>
-              No videos found in storage
-            </Text>
-          ) : (
-            <SimpleGrid columns={[1, 2, 3]} spacing={4}>
-              {videos.map((video) => (
-                <Box
-                  key={video.id}
-                  p={4}
-                  borderWidth="1px"
-                  borderRadius="lg"
-                  overflow="hidden"
-                  bg="gray.50"
-                >
-                  <Text fontWeight="bold" fontSize="sm" noOfLines={2}>
-                    {video.name}
-                  </Text>
-                  <Text fontSize="xs" color="gray.500" mt={1}>
-                    Uploaded: {new Date(video.created_at).toLocaleDateString()}
-                  </Text>
-                  <Text fontSize="xs" color="gray.500">
-                    Size: {(video.metadata.size / (1024 * 1024)).toFixed(2)} MB
-                  </Text>
-                  <Button
-                    mt={2}
-                    size="xs"
-                    colorScheme="blue"
-                    variant="outline"
-                    onClick={() => {
-                      const { data } = supabase.storage
-                        .from('videos')
-                        .getPublicUrl(video.name)
-                      window.open(data.publicUrl, '_blank')
-                    }}
-                  >
-                    View Raw File
-                  </Button>
-                </Box>
+                      {/* Video Clips */}
+                      {video.clips && video.clips.length > 0 && (
+                        <Box>
+                          <Text fontSize="sm" fontWeight="semibold" mb={2}>
+                            Video Clips ({video.clips.length})
+                          </Text>
+                          <SimpleGrid columns={[2, 3, 4]} spacing={2}>
+                            {video.clips.map((clip) => (
+                              <Box
+                                key={clip.id}
+                                p={3}
+                                borderWidth="1px"
+                                borderRadius="md"
+                                bg={clip.pothole_detected ? "orange.50" : "gray.50"}
+                                borderColor={clip.pothole_detected ? "orange.200" : "gray.200"}
+                              >
+                                <VStack spacing={1} align="start">
+                                  <HStack justify="space-between" w="100%">
+                                    <Text fontSize="xs" fontWeight="semibold">
+                                      Clip {clip.clip_index + 1}
+                                    </Text>
+                                    {clip.pothole_detected && (
+                                      <Badge colorScheme="orange" size="xs">
+                                        Pothole
+                                      </Badge>
+                                    )}
+                                  </HStack>
+                                  <Text fontSize="xs" color="gray.600">
+                                    {formatDuration(clip.duration)}
+                                  </Text>
+                                  {clip.gps_records && clip.gps_records.length > 0 && (
+                                    <Text fontSize="xs" color="gray.600">
+                                      {clip.gps_records.length} GPS points
+                                    </Text>
+                                  )}
+                                  <Button
+                                    size="xs"
+                                    colorScheme="blue"
+                                    variant="outline"
+                                    onClick={() => handleViewClip(clip.clip_file_path)}
+                                  >
+                                    View
+                                  </Button>
+                                </VStack>
+                              </Box>
+                            ))}
+                          </SimpleGrid>
+                        </Box>
+                      )}
+                      
+                      {/* Show loading for clips if video is expanded but clips not loaded */}
+                      {expandedVideo === video.id && !video.clips && video.processing_status === 'completed' && (
+                        <Box textAlign="center" py={4}>
+                          <Spinner size="sm" />
+                          <Text fontSize="sm" color="gray.500" mt={2}>Loading clips...</Text>
+                        </Box>
+                      )}
+                    </VStack>
+                  </AccordionPanel>
+                </AccordionItem>
               ))}
-            </SimpleGrid>
+            </Accordion>
           )}
         </Box>
 

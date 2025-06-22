@@ -7,11 +7,10 @@ const __dirname = dirname(__filename);
 
 console.log('Starting servers...');
 
-// Start Express server
-const expressServer = spawn('npx', ['ts-node', 'src/server/index.ts'], {
+// Start Express server using npm run
+const expressServer = spawn('npm', ['run', 'dev:server'], {
     stdio: 'inherit',
-    env: { ...process.env, PORT: '3001' },
-    shell: true
+    env: { ...process.env, PORT: '3001' }
 });
 
 expressServer.on('error', (err) => {
@@ -19,10 +18,9 @@ expressServer.on('error', (err) => {
     process.exit(1);
 });
 
-// Start Vite dev server
-const viteServer = spawn('npx', ['vite'], {
-    stdio: 'inherit',
-    shell: true
+// Start Vite dev server using npm run
+const viteServer = spawn('npm', ['run', 'dev'], {
+    stdio: 'inherit'
 });
 
 viteServer.on('error', (err) => {

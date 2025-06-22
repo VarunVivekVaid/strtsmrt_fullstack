@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { supabase } from '../config/supabaseClient'
+import { VideoDatabase } from '../services/videoDatabase'
 import { 
   Box, 
   Button, 
@@ -16,131 +17,16 @@ import {
   Divider
 } from '@chakra-ui/react'
 import { SUPPORTED_CAMERAS } from '../types/video'
-import type { CameraType } from '../types/video'
-import { VideoMetadataProcessor } from '../services/videoMetadataProcessor'
-import { VideoDatabase } from '../services/videoDatabase'
+import type { CameraType, VideoMetadata } from '../types/video'
 
 export default function VideoUpload() {
   const [uploading, setUploading] = useState(false)
-  const [processing, setProcessing] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [selectedCamera, setSelectedCamera] = useState<string>('garmin_dashcam')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [processingStatus, setProcessingStatus] = useState<string>('')
+  const [status, setStatus] = useState<string>('')
   const [error, setError] = useState<string>('')
   const [success, setSuccess] = useState<string>('')
-
-  /**
-   * Compresses a video file using browser's MediaRecorder API
-   */
-  const compressVideo = async (file: File): Promise<File> => {
-    return new Promise((resolve, reject) => {
-      const video = document.createElement('video')
-      video.preload = 'metadata'
-      
-      video.onloadedmetadata = () => {
-        // Set video quality parameters
-        const targetWidth = 1280 // 720p width
-        const targetHeight = 720 // 720p height
-        const targetBitrate = 2000000 // 2Mbps target bitrate
-        
-        // Create canvas for resizing
-        const canvas = document.createElement('canvas')
-        canvas.width = targetWidth
-        canvas.height = targetHeight
-        const ctx = canvas.getContext('2d')
-        
-        if (!ctx) {
-          reject(new Error('Failed to get canvas context'))
-          return
-        }
-
-        // Check if MediaRecorder is supported
-        if (!window.MediaRecorder) {
-          reject(new Error('MediaRecorder not supported in this browser'))
-          return
-        }
-
-        // Get supported mime types
-        const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-          ? 'video/webm;codecs=vp9'
-          : MediaRecorder.isTypeSupported('video/webm')
-            ? 'video/webm'
-            : 'video/mp4'
-
-        console.log('Using mime type:', mimeType)
-        
-        // Create MediaRecorder with compression settings
-        const stream = canvas.captureStream(30) // 30fps
-        const mediaRecorder = new MediaRecorder(stream, {
-          mimeType: mimeType,
-          videoBitsPerSecond: targetBitrate
-        })
-        
-        const chunks: Blob[] = []
-        mediaRecorder.ondataavailable = (e) => {
-          if (e.data.size > 0) {
-            chunks.push(e.data)
-          }
-        }
-
-        mediaRecorder.onstop = () => {
-          if (chunks.length === 0) {
-            reject(new Error('No video data was recorded'))
-            return
-          }
-
-          const compressedBlob = new Blob(chunks, { type: mimeType })
-          console.log('Compressed blob size:', compressedBlob.size / (1024 * 1024), 'MB')
-          
-          if (compressedBlob.size === 0) {
-            reject(new Error('Compression resulted in empty file'))
-            return
-          }
-
-          const compressedFile = new File([compressedBlob], file.name.replace(/\.[^/.]+$/, '.webm'), {
-            type: mimeType
-          })
-          resolve(compressedFile)
-        }
-
-        mediaRecorder.onerror = (event) => {
-          reject(new Error(`MediaRecorder error: ${event.error}`))
-        }
-        
-        // Start recording
-        mediaRecorder.start(1000) // Collect data every second
-        
-        // Process video frames
-        video.currentTime = 0
-        let frameCount = 0
-        const totalFrames = Math.ceil(video.duration * 30) // 30fps
-        
-        const processFrame = () => {
-          if (video.currentTime >= video.duration) {
-            mediaRecorder.stop()
-            return
-          }
-          
-          ctx.drawImage(video, 0, 0, targetWidth, targetHeight)
-          frameCount++
-          
-          // Update progress
-          const progress = (frameCount / totalFrames) * 100
-          setUploadProgress(progress)
-          
-          video.currentTime += 1/30 // Process at 30fps
-          requestAnimationFrame(processFrame)
-        }
-        
-        video.play()
-        processFrame()
-      }
-      
-      video.onerror = () => reject(new Error('Error loading video'))
-      video.src = URL.createObjectURL(file)
-    })
-  }
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     setError('')
@@ -153,16 +39,20 @@ export default function VideoUpload() {
 
     const file = event.target.files[0]
     
-    // Validate file type
-    if (!VideoMetadataProcessor.isVideoFile(file)) {
-      setError('Please select a valid video file (MP4, MOV, AVI)')
+    // File size validation (5GB = 5 * 1024 * 1024 * 1024 bytes)
+    const maxFileSize = 5 * 1024 * 1024 * 1024 // 5GB
+    if (file.size > maxFileSize) {
+      setError(`File size (${(file.size / (1024 * 1024 * 1024)).toFixed(2)}GB) exceeds the maximum allowed size of 5GB`)
       setSelectedFile(null)
       return
     }
     
-    // Validate camera compatibility
-    if (!VideoMetadataProcessor.isCameraSupportedForFile(file, selectedCamera)) {
-      setError(`This file doesn't appear to be from a ${getCameraName(selectedCamera)}. Please check your camera selection.`)
+    // Basic validation - just check if it's a video file
+    if (!file.type.startsWith('video/') && 
+        !file.name.toLowerCase().endsWith('.mp4') &&
+        !file.name.toLowerCase().endsWith('.mov') &&
+        !file.name.toLowerCase().endsWith('.avi')) {
+      setError('Please select a valid video file (MP4, MOV, AVI)')
       setSelectedFile(null)
       return
     }
@@ -189,7 +79,6 @@ export default function VideoUpload() {
 
     try {
       setUploading(true)
-      setProcessing(true)
       setError('')
       setSuccess('')
       
@@ -199,62 +88,73 @@ export default function VideoUpload() {
         throw new Error('You must be logged in to upload videos')
       }
 
-      // Step 1: Compress video
-      setProcessingStatus('Compressing video...')
-      let compressedFile: File
-      try {
-        compressedFile = await compressVideo(selectedFile)
-        console.log('Original size:', selectedFile.size / (1024 * 1024), 'MB')
-        console.log('Compressed size:', compressedFile.size / (1024 * 1024), 'MB')
-        
-        if (compressedFile.size === 0) {
-          throw new Error('Compression failed - resulting file is empty')
-        }
-      } catch (compressionError) {
-        console.error('Compression error:', compressionError)
-        throw new Error(`Video compression failed: ${compressionError.message}`)
-      }
-
-      // Step 2: Process video metadata
-      setProcessingStatus('Extracting video metadata...')
-      const processedData = await VideoMetadataProcessor.processVideoFile(
-        compressedFile, 
-        selectedCamera, 
-        user.id
-      )
-
-      // Step 3: Upload file to storage
-      setProcessingStatus('Uploading video file...')
-      const fileExt = 'webm' // Always use webm for compressed files
+      // Step 1: Upload raw video file to storage
+      setStatus('Uploading raw video file...')
+      const fileExt = selectedFile.name.split('.').pop() || 'mp4'
       const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`
-      const filePath = `videos/${user.id}/${fileName}`
+      const filePath = `raw-videos/${user.id}/${fileName}`
 
       const { error: uploadError } = await supabase.storage
         .from('videos')
-        .upload(filePath, compressedFile, {
-          onUploadProgress: (progress) => {
-            const percent = (progress.loaded / progress.total) * 100
-            setUploadProgress(percent)
-          }
+        .upload(filePath, selectedFile, {
+          cacheControl: '3600',
+          upsert: false
         })
 
       if (uploadError) {
-        throw new Error(`Storage upload failed: ${uploadError.message}`)
+        console.error('Supabase upload error:', uploadError)
+        
+        // Provide specific error messages for common issues
+        if (uploadError.message.includes('maximum allowed size')) {
+          throw new Error(`File size (${(selectedFile.size / (1024 * 1024)).toFixed(2)}MB) exceeds Supabase Storage limits. Please try a smaller file or contact support.`)
+        } else if (uploadError.message.includes('bucket')) {
+          throw new Error('Storage bucket not found or access denied. Please check your Supabase configuration.')
+        } else if (uploadError.message.includes('unauthorized')) {
+          throw new Error('Upload unauthorized. Please check your authentication and storage permissions.')
+        } else {
+          throw new Error(`Upload failed: ${uploadError.message}`)
+        }
       }
 
-      // Step 4: Store metadata in database
-      setProcessingStatus('Storing video metadata...')
-      processedData.metadata.file_path = filePath
-      
-      const storedMetadata = await VideoDatabase.storeVideoMetadata(processedData.metadata)
-      
-      setSuccess(`Video uploaded successfully! 
-        ${processedData.gpsRecords.length > 0 
-          ? `Extracted ${processedData.gpsRecords.length} GPS points.` 
-          : 'Note: GPS data extraction is not available. Please install ExifTool for GPS support.'
+      // Step 2: Create initial video metadata entry
+      setStatus('Creating video metadata entry...')
+      const videoMetadata: VideoMetadata = {
+        file_name: selectedFile.name,
+        file_path: filePath,
+        camera_id: selectedCamera,
+        upload_user_id: user.id,
+        file_size: selectedFile.size,
+        processing_status: 'unprocessed',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }
+
+      let storedMetadata: VideoMetadata
+      try {
+        storedMetadata = await VideoDatabase.storeVideoMetadata(videoMetadata)
+      } catch (metadataError) {
+        console.error('Error creating video metadata:', metadataError)
+        // If metadata creation fails, we should clean up the uploaded file
+        const { error: deleteError } = await supabase.storage
+          .from('videos')
+          .remove([filePath])
+        
+        if (deleteError) {
+          console.error('Error cleaning up uploaded file after metadata failure:', deleteError)
         }
-        Original size: ${(selectedFile.size / (1024 * 1024)).toFixed(2)}MB
-        Compressed size: ${(compressedFile.size / (1024 * 1024)).toFixed(2)}MB`)
+        
+        throw new Error(`Failed to create video metadata: ${metadataError instanceof Error ? metadataError.message : 'Unknown error'}`)
+      }
+
+      setStatus('Video uploaded! Processing will begin automatically...')
+      setUploadProgress(100)
+
+      setSuccess(`Video uploaded successfully! 
+        Processing will begin automatically in the background and results will be available shortly.
+        Original file size: ${(selectedFile.size / (1024 * 1024)).toFixed(2)}MB
+        Video ID: ${storedMetadata.id}
+        
+        You can check the Video Management section to monitor processing status.`)
       
       // Reset form
       setSelectedFile(null)
@@ -266,9 +166,8 @@ export default function VideoUpload() {
       setError(`Error uploading file: ${error instanceof Error ? error.message : 'Unknown error occurred'}`)
     } finally {
       setUploading(false)
-      setProcessing(false)
       setUploadProgress(0)
-      setProcessingStatus('')
+      setStatus('')
     }
   }
 
@@ -363,7 +262,7 @@ export default function VideoUpload() {
           size="lg"
           onClick={handleUpload}
           isLoading={uploading}
-          loadingText={processing ? processingStatus : "Uploading..."}
+          loadingText={status || "Uploading..."}
           disabled={!selectedFile || uploading}
         >
           Upload Video
@@ -380,7 +279,7 @@ export default function VideoUpload() {
               borderRadius="md"
             />
             <Text fontSize="sm" color="gray.600">
-              {processingStatus || `Upload Progress: ${uploadProgress.toFixed(1)}%`}
+              {status || `Upload Progress: ${uploadProgress.toFixed(1)}%`}
             </Text>
           </VStack>
         )}
@@ -412,16 +311,19 @@ export default function VideoUpload() {
           <Text fontSize="sm" fontWeight="medium" mb={2}>Usage Tips:</Text>
           <VStack align="start" spacing={1}>
             <Text fontSize="xs" color="gray.600">
+              • Raw videos are uploaded and processed on our servers
+            </Text>
+            <Text fontSize="xs" color="gray.600">
+              • Processing includes GPS extraction, video segmentation, and metadata analysis
+            </Text>
+            <Text fontSize="xs" color="gray.600">
               • For Garmin cameras, ensure GPS was enabled during recording
             </Text>
             <Text fontSize="xs" color="gray.600">
               • Supported formats: MP4, MOV, AVI
             </Text>
             <Text fontSize="xs" color="gray.600">
-              • Files with "GRMN" in the name are automatically detected as Garmin
-            </Text>
-            <Text fontSize="xs" color="gray.600">
-              • Large files may take several minutes to process
+              • Processing may take several minutes for large files
             </Text>
           </VStack>
         </Box>

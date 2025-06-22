@@ -11,9 +11,11 @@ export interface VideoMetadata {
   upload_user_id: string
   duration?: number
   file_size: number
+  raw_metadata?: any
+  processing_status?: 'unprocessed' | 'processing' | 'completed' | 'failed'
+  processing_error?: string
   created_at?: string
   updated_at?: string
-  raw_metadata?: any
 }
 
 export interface GPSRecord {

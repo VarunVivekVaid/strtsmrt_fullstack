@@ -3,7 +3,10 @@ import cors from 'cors';
 import path from 'path';
 import multer from 'multer';
 import fs from 'fs';
-import gpsRouter from './api/gps';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -37,8 +40,10 @@ app.use(express.urlencoded({ extended: true }));
 // Serve static files from the root directory
 app.use(express.static(path.join(__dirname, '../../')));
 
-// Routes
-app.use('/api/gps', gpsRouter);
+// Basic health check route
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', message: 'Express server is running' });
+});
 
 // Error handling middleware
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
