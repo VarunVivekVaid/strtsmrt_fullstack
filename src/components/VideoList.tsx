@@ -88,15 +88,25 @@ export default function VideoList() {
   }, [])
 
   const checkAdminStatus = async () => {
-    const { data: { user } } = await supabase.auth.getUser()
-    if (user) {
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('is_admin')
-        .eq('id', user.id)
-        .single()
-      
-      setIsAdmin(profile?.is_admin || false)
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (user) {
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('is_admin')
+          .eq('id', user.id)
+          .single()
+        
+        if (profileError) {
+          console.warn('Failed to fetch admin status:', profileError)
+          setIsAdmin(false)
+        } else {
+          setIsAdmin(profile?.is_admin || false)
+        }
+      }
+    } catch (error) {
+      console.error('Error checking admin status:', error)
+      setIsAdmin(false)
     }
   }
 
@@ -199,7 +209,6 @@ export default function VideoList() {
       case 'completed': return 'green'
       case 'processing': return 'yellow' 
       case 'failed': return 'red'
-      case 'unprocessed': return 'gray'
       default: return 'gray'
     }
   }
@@ -207,9 +216,8 @@ export default function VideoList() {
   const getStatusDisplay = (status: string) => {
     switch (status) {
       case 'completed': return 'Completed'
-      case 'processing': return 'Processing...'
+      case 'processing': return 'Processing'
       case 'failed': return 'Failed'
-      case 'unprocessed': return 'Unprocessed'
       default: return status
     }
   }
@@ -343,7 +351,7 @@ export default function VideoList() {
                         </Box>
                       )}
                       
-                      {video.processing_status === 'unprocessed' && (
+                      {video.processing_status === 'processing' && (
                         <Alert status="info" size="sm">
                           <AlertIcon />
                           <Text fontSize="sm">Video uploaded successfully. Ready for processing.</Text>

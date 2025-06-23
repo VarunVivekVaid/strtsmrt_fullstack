@@ -65,6 +65,26 @@ export default function VideoUpload() {
     return camera ? camera.name : 'Unknown Camera'
   }
 
+  const checkStorageAccess = async () => {
+    try {
+      // Test if we can list the videos bucket
+      const { data, error } = await supabase.storage
+        .from('videos')
+        .list('', { limit: 1 })
+      
+      if (error) {
+        console.error('Storage access test failed:', error)
+        return false
+      }
+      
+      console.log('Storage access test successful')
+      return true
+    } catch (error) {
+      console.error('Storage access test error:', error)
+      return false
+    }
+  }
+
   const handleUpload = async () => {
     if (!selectedFile) {
       setError('Please select a file first')
@@ -82,11 +102,25 @@ export default function VideoUpload() {
       setError('')
       setSuccess('')
       
+      // Test storage access first
+      setStatus('Checking storage access...')
+      const storageAccessible = await checkStorageAccess()
+      if (!storageAccessible) {
+        throw new Error('Storage bucket "videos" is not accessible. Please check your Supabase configuration and ensure the videos bucket exists with proper permissions.')
+      }
+      
       // Get current user
-      const { data: { user } } = await supabase.auth.getUser()
+      const { data: { user }, error: userError } = await supabase.auth.getUser()
+      if (userError) {
+        console.error('Auth error:', userError)
+        throw new Error('Authentication error. Please log in again.')
+      }
+      
       if (!user) {
         throw new Error('You must be logged in to upload videos')
       }
+
+      console.log('User authenticated:', user.id)
 
       // Step 1: Upload raw video file to storage
       setStatus('Uploading raw video file...')
@@ -94,7 +128,9 @@ export default function VideoUpload() {
       const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`
       const filePath = `raw-videos/${user.id}/${fileName}`
 
-      const { error: uploadError } = await supabase.storage
+      console.log('Uploading to path:', filePath)
+
+      const { data: uploadData, error: uploadError } = await supabase.storage
         .from('videos')
         .upload(filePath, selectedFile, {
           cacheControl: '3600',
@@ -107,14 +143,16 @@ export default function VideoUpload() {
         // Provide specific error messages for common issues
         if (uploadError.message.includes('maximum allowed size')) {
           throw new Error(`File size (${(selectedFile.size / (1024 * 1024)).toFixed(2)}MB) exceeds Supabase Storage limits. Please try a smaller file or contact support.`)
-        } else if (uploadError.message.includes('bucket')) {
-          throw new Error('Storage bucket not found or access denied. Please check your Supabase configuration.')
+        } else if (uploadError.message.includes('bucket') || uploadError.message.includes('not found')) {
+          throw new Error('Storage bucket "videos" not found or access denied. Please check your Supabase configuration and ensure the videos bucket exists.')
         } else if (uploadError.message.includes('unauthorized')) {
           throw new Error('Upload unauthorized. Please check your authentication and storage permissions.')
         } else {
           throw new Error(`Upload failed: ${uploadError.message}`)
         }
       }
+
+      console.log('File uploaded successfully:', uploadData)
 
       // Step 2: Create initial video metadata entry
       setStatus('Creating video metadata entry...')
@@ -124,7 +162,7 @@ export default function VideoUpload() {
         camera_id: selectedCamera,
         upload_user_id: user.id,
         file_size: selectedFile.size,
-        processing_status: 'unprocessed',
+        processing_status: 'processing',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }
@@ -132,6 +170,7 @@ export default function VideoUpload() {
       let storedMetadata: VideoMetadata
       try {
         storedMetadata = await VideoDatabase.storeVideoMetadata(videoMetadata)
+        console.log('Video metadata stored:', storedMetadata)
       } catch (metadataError) {
         console.error('Error creating video metadata:', metadataError)
         // If metadata creation fails, we should clean up the uploaded file

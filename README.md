@@ -65,10 +65,10 @@ The application implements the following workflow for video uploads:
 2. **Metadata Creation**: An initial entry is created in the `video_metadata` table with:
    - File information (name, path, size)
    - Camera type and user ID
-   - Processing status set to `'unprocessed'`
+   - Processing status set to `'processing'`
    - Created/updated timestamps
 3. **Status Tracking**: The video list shows the current processing status:
-   - `unprocessed`: Video uploaded, ready for processing
+   - `processing`: Video uploaded, ready for processing
    - `processing`: Currently being processed
    - `completed`: Processing finished successfully
    - `failed`: Processing failed with error details
@@ -76,7 +76,7 @@ The application implements the following workflow for video uploads:
 ### Processing Status Flow
 
 ```
-Upload → unprocessed → processing → completed/failed
+Upload → processing → completed/failed
 ```
 
 ### Database Schema

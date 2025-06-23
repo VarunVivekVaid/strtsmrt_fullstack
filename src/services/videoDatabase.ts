@@ -23,7 +23,7 @@ export class VideoDatabase {
         duration DECIMAL(10, 2),
         file_size BIGINT NOT NULL,
         raw_metadata JSONB,
-        processing_status TEXT DEFAULT 'unprocessed' CHECK (processing_status IN ('unprocessed', 'processing', 'completed', 'failed')),
+        processing_status TEXT DEFAULT 'processing' CHECK (processing_status IN ('processing', 'completed', 'failed')),
         processing_error TEXT,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -81,7 +81,7 @@ export class VideoDatabase {
           duration: metadata.duration,
           file_size: metadata.file_size,
           raw_metadata: metadata.raw_metadata,
-          processing_status: metadata.processing_status || 'unprocessed',
+          processing_status: metadata.processing_status || 'processing',
           processing_error: metadata.processing_error
         }])
         .select()
@@ -202,7 +202,7 @@ export class VideoDatabase {
   /**
    * Updates the processing status of a video
    */
-  static async updateProcessingStatus(id: string, status: 'unprocessed' | 'processing' | 'completed' | 'failed', error?: string): Promise<VideoMetadata> {
+  static async updateProcessingStatus(id: string, status: 'processing' | 'completed' | 'failed', error?: string): Promise<VideoMetadata> {
     try {
       const { data, error: updateError } = await supabase
         .from('video_metadata')

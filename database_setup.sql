@@ -117,13 +117,25 @@ CREATE POLICY "Admins can update all clips" ON video_clips
 CREATE POLICY "Users can upload videos" ON storage.objects
   FOR INSERT WITH CHECK (
     bucket_id = 'videos' AND 
-    auth.uid()::text = (storage.foldername(name))[1]
+    (storage.foldername(name))[1] = 'raw-videos' AND
+    auth.uid()::text = (storage.foldername(name))[2]
   );
 
 CREATE POLICY "Users can view own videos" ON storage.objects
   FOR SELECT USING (
     bucket_id = 'videos' AND 
-    auth.uid()::text = (storage.foldername(name))[1]
+    ((storage.foldername(name))[1] = 'raw-videos' AND auth.uid()::text = (storage.foldername(name))[2]) OR
+    ((storage.foldername(name))[1] = 'processed-clips' AND auth.uid()::text = (storage.foldername(name))[2])
+  );
+
+CREATE POLICY "Admins can view all videos" ON storage.objects
+  FOR SELECT USING (
+    bucket_id = 'videos' AND 
+    EXISTS (
+      SELECT 1 FROM profiles 
+      WHERE profiles.id = auth.uid() 
+      AND profiles.is_admin = true
+    )
   );
 
 -- Create a trigger to automatically create a profile when a user signs up
@@ -156,7 +168,7 @@ CREATE TABLE IF NOT EXISTS video_metadata (
   duration DECIMAL(10, 2),
   file_size BIGINT NOT NULL,
   raw_metadata JSONB,
-  processing_status TEXT DEFAULT 'unprocessed' CHECK (processing_status IN ('unprocessed', 'processing', 'completed', 'failed')),
+  processing_status TEXT DEFAULT 'processing' CHECK (processing_status IN ('processing', 'completed', 'failed')),
   processing_error TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -358,7 +370,7 @@ BEGIN
       'garmin_dashcam', -- Default camera type, can be updated later
       file_info.user_id::uuid,
       NEW.metadata->>'size',
-      'unprocessed',
+      'processing',
       NOW()
     ) RETURNING * INTO video_metadata;
     
