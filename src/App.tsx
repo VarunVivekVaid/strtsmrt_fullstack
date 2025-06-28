@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { ChakraProvider, Box, Container, VStack, Button, HStack, Text, Divider } from '@chakra-ui/react'
+import { ChakraProvider, Box, Container, VStack, Button, HStack, Text, Divider, Alert, AlertIcon, AlertTitle, AlertDescription } from '@chakra-ui/react'
 import { supabase } from './config/supabaseClient'
 import type { Session } from '@supabase/supabase-js'
 import AuthComponent from './components/Auth'
@@ -11,9 +11,21 @@ function App() {
   const [currentView, setCurrentView] = useState<'upload' | 'admin'>('upload')
   const [isAdmin, setIsAdmin] = useState(false)
   const [userProfile, setUserProfile] = useState<any>(null)
+  const [supabaseError, setSupabaseError] = useState<string | null>(null)
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    // Check if Supabase is properly configured
+    if (!import.meta.env.VITE_SUPABASE_URL || !import.meta.env.VITE_SUPABASE_ANON_KEY) {
+      setSupabaseError('Supabase environment variables are not configured. Please check your .env file.')
+      return
+    }
+
+    supabase.auth.getSession().then(({ data: { session }, error }) => {
+      if (error) {
+        console.error('Supabase auth error:', error)
+        setSupabaseError('Unable to connect to Supabase. Please ensure Supabase is running.')
+        return
+      }
       setSession(session)
       if (session) {
         checkUserProfile(session.user.id)
@@ -54,6 +66,39 @@ function App() {
 
   const handleSignOut = async () => {
     await supabase.auth.signOut()
+  }
+
+  // Show error message if Supabase is not available
+  if (supabaseError) {
+    return (
+      <ChakraProvider>
+        <Box minH="100vh" bg="gray.50" py={8}>
+          <Container maxW="container.md">
+            <Alert status="error">
+              <AlertIcon />
+              <AlertTitle>Configuration Error</AlertTitle>
+              <AlertDescription>
+                {supabaseError}
+                <br />
+                <br />
+                To fix this issue:
+                <br />
+                1. Create a .env file in the project root
+                <br />
+                2. Add your Supabase URL and anon key:
+                <br />
+                VITE_SUPABASE_URL=your_supabase_url
+                <br />
+                VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
+                <br />
+                <br />
+                Or start Supabase locally with: supabase start
+              </AlertDescription>
+            </Alert>
+          </Container>
+        </Box>
+      </ChakraProvider>
+    )
   }
 
   if (!session) {
