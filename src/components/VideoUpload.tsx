@@ -56,7 +56,7 @@ export default function VideoUpload() {
       setSelectedFile(null)
       return
     }
-    
+
     setSelectedFile(file)
   }
 
@@ -195,6 +195,21 @@ export default function VideoUpload() {
         
         You can check the Video Management section to monitor processing status.`)
       
+      // Trigger backend GPS extraction and update
+      setStatus('Extracting GPS coordinates from video...')
+      try {
+        const response = await fetch(`/api/process-video/${storedMetadata.id}`, {
+          method: 'POST',
+        });
+        const result = await response.json();
+        if (result.success) {
+          setStatus('GPS extraction and metadata update completed!');
+        } else {
+          setStatus('GPS extraction failed: ' + (result.error || 'Unknown error'));
+        }
+      } catch (err) {
+        setStatus('Error calling backend for GPS extraction: ' + (err instanceof Error ? err.message : 'Unknown error'));
+      }
       // Reset form
       setSelectedFile(null)
       const fileInput = document.getElementById('video-upload') as HTMLInputElement

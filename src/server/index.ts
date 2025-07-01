@@ -129,227 +129,158 @@ app.get('/api/debug/video/:videoId', async (req, res) => {
 });
 
 // Video processing endpoint
+// [INFO] This endpoint downloads the video, extracts GPS data, and updates start/end coordinates in Supabase after extraction.
 app.post('/api/process-video/:videoId', async (req, res) => {
   const { videoId } = req.params;
-  
-  try {
-    console.log(`Starting video processing for video ID: ${videoId}`);
-    
-    // Step 1: Get video metadata from database
-    const { data: videoMetadata, error: dbError } = await supabase
-      .from('video_metadata')
-      .select('*')
-      .eq('id', videoId)
-      .single();
-    
-    if (dbError || !videoMetadata) {
-      throw new Error(`Video not found: ${dbError?.message || 'Unknown error'}`);
-    }
-    
-    console.log(`Found video: ${videoMetadata.file_name}`);
-    
-    // Step 2: Update processing status to 'processing'
-    await supabase
-      .from('video_metadata')
-      .update({ 
-        processing_status: 'processing',
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', videoId);
-    
-    // Step 3: Download video from Supabase storage
-    const tempDir = path.join(process.cwd(), 'temp');
-    const tempVideoPath = path.join(tempDir, `${videoId}-${videoMetadata.file_name}`);
-    
-    // Ensure temp directory exists
-    if (!fs.existsSync(tempDir)) {
-      console.log(`Creating temp directory: ${tempDir}`);
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-    
-    console.log(`Downloading video from: ${videoMetadata.file_path}`);
-    console.log(`Temp directory: ${tempDir}`);
-    console.log(`Temp path: ${tempVideoPath}`);
-    console.log(`Video metadata:`, JSON.stringify(videoMetadata, null, 2));
-    
-    // Try to download the video
-    let videoData = null;
-    let downloadError = null;
-    
-    // First try the path from database
-    console.log('Attempting download with database path...');
-    const downloadResult = await supabase.storage
-      .from('videos')
-      .download(videoMetadata.file_path);
-    
-    videoData = downloadResult.data;
-    downloadError = downloadResult.error;
-    
-    // If that fails, try to find the actual file
-    if (downloadError) {
-      console.log('Database path failed, trying to find actual file...');
-      
-      // Get the directory path
-      const dirPath = videoMetadata.file_path.split('/').slice(0, -1).join('/');
-      console.log(`Looking in directory: ${dirPath}`);
-      
-      // List files in the directory
-      const { data: files, error: listError } = await supabase.storage
-        .from('videos')
-        .list(dirPath);
-      
-      if (!listError && files && files.length > 0) {
-        console.log('Available files in directory:');
-        files.forEach(file => console.log(`  - ${file.name}`));
-        
-        // Try to download the first video file found
-        const videoFile = files.find(file => 
-          file.name.toLowerCase().endsWith('.mp4') || 
-          file.name.toLowerCase().endsWith('.mov') ||
-          file.name.toLowerCase().endsWith('.avi')
-        );
-        
-        if (videoFile) {
-          console.log(`Trying to download: ${videoFile.name}`);
-          const actualPath = `${dirPath}/${videoFile.name}`;
-          
-          const fallbackResult = await supabase.storage
-            .from('videos')
-            .download(actualPath);
-          
-          if (!fallbackResult.error && fallbackResult.data) {
-            console.log('✅ Successfully downloaded using fallback path');
-            videoData = fallbackResult.data;
-            downloadError = null;
-          } else {
-            console.log('Fallback download also failed:', fallbackResult.error?.message);
-            downloadError = fallbackResult.error;
-          }
-        } else {
-          console.log('No video files found in directory');
-        }
-      } else {
-        console.log('Failed to list directory:', listError?.message);
+
+  // Respond immediately so the frontend isn't blocked
+  res.json({ success: true, message: 'GPS extraction started in background', videoId });
+
+  // Run extraction in the background
+  setTimeout(async () => {
+    console.time(`[${videoId}] TOTAL processing time`);
+    try {
+      // Step 1: Get video metadata from database
+      console.time(`[${videoId}] DB fetch`);
+      const { data: videoMetadata, error: dbError } = await supabase
+        .from('video_metadata')
+        .select('*')
+        .eq('id', videoId)
+        .single();
+      console.timeEnd(`[${videoId}] DB fetch`);
+      if (dbError || !videoMetadata) {
+        throw new Error(`Video not found: ${dbError?.message || 'Unknown error'}`);
       }
-    }
-    
-    if (downloadError) {
-      console.error('Download error details:', downloadError);
-      throw new Error(`Failed to download video: ${downloadError.message}`);
-    }
-    
-    if (!videoData) {
-      throw new Error('No video data received from Supabase storage');
-    }
-    
-    console.log(`Video data received, size: ${videoData.size} bytes`);
-    
-    // Write video to temp file
-    const arrayBuffer = await videoData.arrayBuffer();
-    console.log(`ArrayBuffer size: ${arrayBuffer.byteLength} bytes`);
-    
-    fs.writeFileSync(tempVideoPath, Buffer.from(arrayBuffer));
-    console.log(`Video downloaded to: ${tempVideoPath}`);
-    
-    // Verify file exists
-    if (!fs.existsSync(tempVideoPath)) {
-      throw new Error(`Failed to write video file to: ${tempVideoPath}`);
-    }
-    
-    const fileStats = fs.statSync(tempVideoPath);
-    console.log(`File written successfully, size: ${fileStats.size} bytes`);
-    
-    // Step 4: Extract GPS data using FFmpeg and ExifTool
-    const gpsData = await extractGpsData(tempVideoPath);
-    
-    // Step 5: Update database with GPS data
-    const updateData: any = {
-      processing_status: 'completed',
-      updated_at: new Date().toISOString()
-    };
-    
-    if (gpsData.hasGpsData && gpsData.gpsRecords.length > 0) {
-      const firstRecord = gpsData.gpsRecords[0];
-      const lastRecord = gpsData.gpsRecords[gpsData.gpsRecords.length - 1];
-      
-      // Store coordinates with full precision (10 decimal places)
-      updateData.start_latitude = parseFloat(firstRecord.latitude.toFixed(10));
-      updateData.start_longitude = parseFloat(firstRecord.longitude.toFixed(10));
-      updateData.end_latitude = parseFloat(lastRecord.latitude.toFixed(10));
-      updateData.end_longitude = parseFloat(lastRecord.longitude.toFixed(10));
-      updateData.raw_metadata = {
-        gpsFormat: gpsData.gpsFormat,
-        extractionMethod: gpsData.extractionMethod,
-        totalGpsRecords: gpsData.gpsRecords.length,
-        gpsData: gpsData.gpsRecords.slice(0, 10).map(record => ({
-          latitude: parseFloat(record.latitude.toFixed(10)),
-          longitude: parseFloat(record.longitude.toFixed(10)),
-          timestamp: record.timestamp
-        })) // Store first 10 records as sample with full precision
-      };
-      
-      console.log(`GPS data extracted: ${gpsData.gpsRecords.length} records`);
-      console.log(`Start: ${firstRecord.latitude.toFixed(10)}, ${firstRecord.longitude.toFixed(10)}`);
-      console.log(`End: ${lastRecord.latitude.toFixed(10)}, ${lastRecord.longitude.toFixed(10)}`);
-    } else {
-      updateData.processing_status = 'completed';
-      updateData.raw_metadata = {
-        gpsFormat: 'none',
-        extractionMethod: 'none',
-        error: gpsData.error || 'No GPS data found'
-      };
-      console.log('No GPS data found in video');
-    }
-    
-    // Update database
-    const { error: updateError } = await supabase
-      .from('video_metadata')
-      .update(updateData)
-      .eq('id', videoId);
-    
-    if (updateError) {
-      throw new Error(`Failed to update database: ${updateError.message}`);
-    }
-    
-    // Step 6: Clean up temp file
-    try {
-      fs.unlinkSync(tempVideoPath);
-      console.log(`Cleaned up temp file: ${tempVideoPath}`);
-    } catch (cleanupError) {
-      console.warn(`Failed to clean up temp file: ${cleanupError}`);
-    }
-    
-    res.json({
-      success: true,
-      videoId,
-      gpsDataFound: gpsData.hasGpsData,
-      gpsRecordsCount: gpsData.gpsRecords.length,
-      message: 'Video processing completed successfully'
-    });
-    
-  } catch (error) {
-    console.error('Video processing error:', error);
-    
-    // Update database with error status
-    try {
+      // Step 2: Update processing status to 'processing'
       await supabase
         .from('video_metadata')
-        .update({
-          processing_status: 'failed',
-          processing_error: error instanceof Error ? error.message : 'Unknown error',
+        .update({ 
+          processing_status: 'processing',
           updated_at: new Date().toISOString()
         })
         .eq('id', videoId);
-    } catch (updateError) {
-      console.error('Failed to update error status:', updateError);
+      // Step 3: Download video from Supabase storage
+      const tempDir = path.join(process.cwd(), 'temp');
+      const tempVideoPath = path.join(tempDir, `${videoId}-${videoMetadata.file_name}`);
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+      let videoData = null;
+      let downloadError = null;
+      console.time(`[${videoId}] Supabase download`);
+      const downloadResult = await supabase.storage
+        .from('videos')
+        .download(videoMetadata.file_path);
+      videoData = downloadResult.data;
+      downloadError = downloadResult.error;
+      if (downloadError) {
+        // Try fallback
+        const dirPath = videoMetadata.file_path.split('/').slice(0, -1).join('/');
+        const { data: files, error: listError } = await supabase.storage
+          .from('videos')
+          .list(dirPath);
+        if (!listError && files && files.length > 0) {
+          const videoFile = files.find(file => 
+            file.name.toLowerCase().endsWith('.mp4') || 
+            file.name.toLowerCase().endsWith('.mov') ||
+            file.name.toLowerCase().endsWith('.avi')
+          );
+          if (videoFile) {
+            const actualPath = `${dirPath}/${videoFile.name}`;
+            const fallbackResult = await supabase.storage
+              .from('videos')
+              .download(actualPath);
+            if (!fallbackResult.error && fallbackResult.data) {
+              videoData = fallbackResult.data;
+              downloadError = null;
+            } else {
+              downloadError = fallbackResult.error;
+            }
+          }
+        }
+      }
+      console.timeEnd(`[${videoId}] Supabase download`);
+      if (downloadError) {
+        throw new Error(`Failed to download video: ${downloadError.message}`);
+      }
+      if (!videoData) {
+        throw new Error('No video data received from Supabase storage');
+      }
+      console.time(`[${videoId}] Write temp file`);
+      const arrayBuffer = await videoData.arrayBuffer();
+      fs.writeFileSync(tempVideoPath, Buffer.from(arrayBuffer));
+      console.timeEnd(`[${videoId}] Write temp file`);
+      if (!fs.existsSync(tempVideoPath)) {
+        throw new Error(`Failed to write video file to: ${tempVideoPath}`);
+      }
+      // Step 4: Extract GPS data
+      console.time(`[${videoId}] ExifTool extraction`);
+      const gpsData = await extractGpsData(tempVideoPath);
+      console.timeEnd(`[${videoId}] ExifTool extraction`);
+      // Step 5: Update database with GPS data
+      console.time(`[${videoId}] DB update`);
+      const updateData: any = {
+        processing_status: 'completed',
+        updated_at: new Date().toISOString()
+      };
+      if (gpsData.hasGpsData && gpsData.gpsRecords.length > 0) {
+        const firstRecord = gpsData.gpsRecords[0];
+        const lastRecord = gpsData.gpsRecords[gpsData.gpsRecords.length - 1];
+        updateData.start_latitude = parseFloat(firstRecord.latitude.toFixed(10));
+        updateData.start_longitude = parseFloat(firstRecord.longitude.toFixed(10));
+        updateData.end_latitude = parseFloat(lastRecord.latitude.toFixed(10));
+        updateData.end_longitude = parseFloat(lastRecord.longitude.toFixed(10));
+        updateData.raw_metadata = {
+          gpsFormat: gpsData.gpsFormat,
+          extractionMethod: gpsData.extractionMethod,
+          totalGpsRecords: gpsData.gpsRecords.length,
+          gpsData: gpsData.gpsRecords.slice(0, 10).map(record => ({
+            latitude: parseFloat(record.latitude.toFixed(10)),
+            longitude: parseFloat(record.longitude.toFixed(10)),
+            timestamp: record.timestamp
+          }))
+        };
+      } else {
+        updateData.processing_status = 'completed';
+        updateData.raw_metadata = {
+          gpsFormat: 'none',
+          extractionMethod: 'none',
+          error: gpsData.error || 'No GPS data found'
+        };
+      }
+      const { error: updateError } = await supabase
+        .from('video_metadata')
+        .update(updateData)
+        .eq('id', videoId);
+      console.timeEnd(`[${videoId}] DB update`);
+      if (updateError) {
+        throw new Error(`Failed to update database: ${updateError.message}`);
+      }
+      // Step 6: Clean up temp file
+      try {
+        fs.unlinkSync(tempVideoPath);
+      } catch (cleanupError) {
+        console.warn(`Failed to clean up temp file: ${cleanupError}`);
+      }
+      console.log(`Background GPS extraction and update completed for videoId: ${videoId}`);
+    } catch (error) {
+      console.error('Background GPS extraction error:', error);
+      // Update database with error status
+      try {
+        await supabase
+          .from('video_metadata')
+          .update({
+            processing_status: 'failed',
+            processing_error: error instanceof Error ? error.message : 'Unknown error',
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', videoId);
+      } catch (updateError) {
+        console.error('Failed to update error status:', updateError);
+      }
     }
-    
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error occurred',
-      videoId
-    });
-  }
+    console.timeEnd(`[${videoId}] TOTAL processing time`);
+  }, 100);
 });
 
 // GPS data extraction function
@@ -486,94 +417,58 @@ async function extractGpsWithExifTool(videoPath: string): Promise<{
   const gpsRecords: Array<{latitude: number; longitude: number; timestamp: Date}> = [];
   
   try {
-    // Extract GPS coordinates using ExifTool with -ExtractEmbedded for Garmin data
-    // Use the same approach as extract-coordinates.js - parse text output
-    console.log('Running ExifTool with -ExtractEmbedded (text output)...');
-    const { stdout } = await execAsync(`exiftool -ExtractEmbedded "${videoPath}"`);
-    
-    console.log('Raw ExifTool output (first 1000 chars):', stdout.substring(0, 1000));
-    
-    // Parse the output to find coordinates (same logic as extract-coordinates.js)
+    // Optimized ExifTool command: numeric output, fast scan, only needed tags
+    const { stdout } = await execAsync(`exiftool -n -fast2 -GPSLatitude -GPSLongitude -GPSDateTime -ExtractEmbedded "${videoPath}"`);
+    // Parse output: look for lines like 'GPS Latitude', 'GPS Longitude', 'GPS Date/Time'
     const lines = stdout.split('\n');
-    const coordinates = [];
     let currentEntry: any = {};
-    
     for (const line of lines) {
       const trimmedLine = line.trim();
-      
-      // Look for GPS Date/Time
       if (trimmedLine.startsWith('GPS Date/Time')) {
-        // If we have a complete previous entry, save it
-        if (currentEntry.latitude && currentEntry.longitude) {
-          coordinates.push(currentEntry);
+        if (currentEntry.latitude !== undefined && currentEntry.longitude !== undefined) {
+          gpsRecords.push({
+            latitude: currentEntry.latitude,
+            longitude: currentEntry.longitude,
+            timestamp: currentEntry.timestamp ? new Date(currentEntry.timestamp) : new Date()
+          });
         }
-        // Start new entry
         currentEntry = {};
         const timeMatch = trimmedLine.match(/GPS Date\/Time\s*:\s*(.+)/);
         if (timeMatch) {
           currentEntry.timestamp = timeMatch[1].trim();
         }
       }
-      
-      // Look for GPS Latitude
       if (trimmedLine.startsWith('GPS Latitude')) {
-        const latMatch = trimmedLine.match(/GPS Latitude\s*:\s*(.+)/);
+        const latMatch = trimmedLine.match(/GPS Latitude\s*:\s*([\-\d.]+)/);
         if (latMatch) {
-          const latitude = parseDmsCoordinate(latMatch[1].trim(), 'N');
-          if (latitude !== null) {
-            currentEntry.latitude = latitude;
-          }
+          currentEntry.latitude = parseFloat(latMatch[1]);
         }
       }
-      
-      // Look for GPS Longitude
       if (trimmedLine.startsWith('GPS Longitude')) {
-        const lonMatch = trimmedLine.match(/GPS Longitude\s*:\s*(.+)/);
+        const lonMatch = trimmedLine.match(/GPS Longitude\s*:\s*([\-\d.]+)/);
         if (lonMatch) {
-          const longitude = parseDmsCoordinate(lonMatch[1].trim(), 'W');
-          if (longitude !== null) {
-            currentEntry.longitude = longitude;
-          }
-        }
-      }
-      
-      // Look for GPS Speed
-      if (trimmedLine.startsWith('GPS Speed')) {
-        const speedMatch = trimmedLine.match(/GPS Speed\s*:\s*(.+)/);
-        if (speedMatch) {
-          currentEntry.speed = parseFloat(speedMatch[1].trim());
+          currentEntry.longitude = parseFloat(lonMatch[1]);
         }
       }
     }
-    
     // Don't forget the last entry
-    if (currentEntry.latitude && currentEntry.longitude) {
-      coordinates.push(currentEntry);
+    if (currentEntry.latitude !== undefined && currentEntry.longitude !== undefined) {
+      gpsRecords.push({
+        latitude: currentEntry.latitude,
+        longitude: currentEntry.longitude,
+        timestamp: currentEntry.timestamp ? new Date(currentEntry.timestamp) : new Date()
+      });
     }
-    
-    // Convert to the expected format
-    for (const coord of coordinates) {
-      if (coord.latitude && coord.longitude && isValidGpsCoordinate(coord.latitude, coord.longitude)) {
-        gpsRecords.push({
-          latitude: parseFloat(coord.latitude.toFixed(10)),
-          longitude: parseFloat(coord.longitude.toFixed(10)),
-          timestamp: new Date()
-        });
-      }
-    }
-    
-    console.log(`ExifTool found ${gpsRecords.length} GPS records using text parsing`);
+    console.log(`ExifTool (optimized) found ${gpsRecords.length} GPS records`);
     if (gpsRecords.length > 0) {
-      console.log(`First coordinate: ${gpsRecords[0].latitude.toFixed(10)}, ${gpsRecords[0].longitude.toFixed(10)}`);
+      console.log(`First coordinate: ${gpsRecords[0].latitude}, ${gpsRecords[0].longitude}`);
       if (gpsRecords.length > 1) {
-        console.log(`Last coordinate: ${gpsRecords[gpsRecords.length - 1].latitude.toFixed(10)}, ${gpsRecords[gpsRecords.length - 1].longitude.toFixed(10)}`);
+        console.log(`Last coordinate: ${gpsRecords[gpsRecords.length - 1].latitude}, ${gpsRecords[gpsRecords.length - 1].longitude}`);
       }
     }
-    
   } catch (error) {
     console.error('ExifTool extraction error:', error);
   }
-  
   return { gpsRecords };
 }
 
