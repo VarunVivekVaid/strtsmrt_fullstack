@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
-import { ChakraProvider, Box, Container, VStack, Button, HStack, Text, Divider, Alert, AlertIcon, AlertTitle, AlertDescription } from '@chakra-ui/react'
+import { ChakraProvider, Box, Container, VStack, Button, HStack, Text, Divider, Alert, AlertIcon, AlertTitle, AlertDescription, Grid, GridItem } from '@chakra-ui/react'
 import { supabase } from './config/supabaseClient'
 import type { Session } from '@supabase/supabase-js'
 import AuthComponent from './components/Auth'
 import VideoUpload from './components/VideoUpload'
 import VideoList from './components/VideoList'
+import MapContainer from './components/MapContainer'
 
 function App() {
   const [session, setSession] = useState<Session | null>(null)
@@ -164,7 +165,21 @@ function App() {
 
         {/* Main Content */}
         <Container maxW="container.xl" py={8}>
-          {currentView === 'upload' && <VideoUpload />}
+          {currentView === 'upload' && (
+            <Grid templateColumns={{ base: "1fr", lg: "1fr 1fr" }} gap={8}>
+              <GridItem>
+                <VideoUpload />
+              </GridItem>
+              <GridItem>
+                <MapContainer 
+                  center={[40.7128, -74.0060]} 
+                  zoom={13}
+                  height="500px"
+                  userId={session.user.id}
+                />
+              </GridItem>
+            </Grid>
+          )}
           {currentView === 'admin' && isAdmin && <VideoList />}
         </Container>
 
